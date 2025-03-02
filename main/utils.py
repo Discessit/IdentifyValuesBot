@@ -2,47 +2,14 @@ import os
 import uuid
 import openai
 import aiofiles
-from openai import OpenAI
+import json
 from aiogram import Bot
 from aiogram.types import Message
 from settings.config import settings
+from settings.models import SessionLocal, UserValue
+from validation import extract_user_value
 
 openai_client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY.get_secret_value())
-
-
-def assistant_manager():
-
-    assistant_id = None
-
-    async def ensure_assistant_exists(language: str):
-        nonlocal assistant_id
-
-        if assistant_id:
-            try:
-                await openai_client.beta.assistants.retrieve(assistant_id)
-                return assistant_id
-            except openai.NotFoundError:
-                assistant_id = None
-
-        if not assistant_id:
-            instructions = {
-                "English": "You are a personal assistant. Please answer questions in English.",
-                "Russian": "Вы персональный помощник. Пожалуйста, отвечайте на вопросы на русском языке."
-            }.get(language, "You are a personal assistant. Please answer questions in English.")
-
-            assistant = await openai_client.beta.assistants.create(
-                name="Clever guy",
-                instructions=instructions,
-                model="gpt-4-turbo",
-            )
-            assistant_id = assistant.id
-
-        return assistant_id
-
-    return ensure_assistant_exists
-
-
-ensure_assistant_exists = assistant_manager()
 
 
 async def download_voice(bot: Bot, message: Message) -> str:
@@ -68,8 +35,8 @@ async def transcribe_audio(file_path: str) -> str:
     return response.text
 
 
-async def get_assistant_response(prompt: str, language: str) -> str:
-    assistant_id = await ensure_assistant_exists(language)
+async def get_assistant_response(prompt: str) -> str:
+    assistant_id = settings.ASSISTANT_DEFAULT_API_KEY.get_secret_value()
 
     thread = await openai_client.beta.threads.create()
 
@@ -115,3 +82,99 @@ async def text_to_speech(text: str, language: str) -> str:
         await f.write(response.content)
 
     return file_path
+
+
+async def create_thread():
+    return await openai_client.beta.threads.create()
+
+
+async def send_message_to_thread(thread_id: str, content: str):
+    await openai_client.beta.threads.messages.create(
+        thread_id=thread_id,
+        role="user",
+        content=content
+    )
+
+
+async def run_assistant(thread_id: str, assistant_id: str):
+    run = await openai_client.beta.threads.runs.create_and_poll(
+        thread_id=thread_id,
+        assistant_id=assistant_id
+    )
+    return run
+
+
+async def get_thread_messages(thread_id: str):
+    messages = await openai_client.beta.threads.messages.list(
+        thread_id=thread_id
+    )
+    return messages.data[0].content[0].text.value
+
+
+async def generate_question(thread_id: str, user_input: str):
+    await send_message_to_thread(thread_id, user_input)
+
+    run = await run_assistant(thread_id, settings.ASSISTANT_VALUES_API_KEY.get_secret_value())
+
+    if run.status == "completed":
+        question = await get_thread_messages(thread_id)
+        return question
+    else:
+        raise Exception(f"Run did not complete successfully. Status: {run.status}")
+
+
+async def analyze_user_response(thread_id: str, user_input: str):
+
+    await send_message_to_thread(thread_id, user_input)
+
+    run = await run_assistant(thread_id, settings.ASSISTANT_VALUES_API_KEY.get_secret_value())
+
+    if run.status == "completed":
+        messages = await openai_client.beta.threads.messages.list(thread_id=thread_id)
+
+        for message in messages.data:
+            if message.role == "assistant":
+                response_text = message.content[0].text.value
+                value = await extract_user_value(response_text)
+                return value
+
+    # if run.status == "requires_action":
+    #     tool_outputs = []
+    #
+    #     for tool_call in run.required_action.submit_tool_outputs.tool_calls:
+    #         if tool_call.function.name == "save_value":
+    #             arguments = json.loads(tool_call.function.arguments)
+    #             value = arguments.get("value")
+    #             user_id = arguments.get("user_id")
+    #
+    #             validation_result = await analyze_user_response(thread_id, user_input)
+    #
+    #             if validation_result and validation_result.is_valid:
+    #                 await save_value(validation_result.value, user_id)
+    #                 tool_outputs.append({
+    #                     "tool_call_id": tool_call.id,
+    #                     "output": "Value saved successfully"
+    #                 })
+    #             else:
+    #                 tool_outputs.append({
+    #                     "tool_call_id": tool_call.id,
+    #                     "output": "Invalid value, please ask user more questions"
+    #                 })
+    #
+    #     await openai_client.beta.threads.runs.submit_tool_outputs(
+    #         thread_id=thread_id,
+    #         run_id=run.id,
+    #         tool_outputs=tool_outputs,
+    #     )
+    #
+    #     return validation_result if validation_result.is_valid else None
+
+    return None
+
+
+async def save_value(value: str, user_id: int):
+
+    async with SessionLocal() as session:
+        new_value = UserValue(user_id=user_id, value=value)
+        session.add(new_value)
+        await session.commit()

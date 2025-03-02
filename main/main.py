@@ -6,7 +6,7 @@ from aiogram.types import Message
 from aiogram import F
 from aiogram.client.default import DefaultBotProperties
 from settings.config import settings
-from handlers import process_voice
+from handlers import process_voice, handle_user_value, start_value_dialogue
 
 bot_token = settings.BOT_TOKEN.get_secret_value()
 
@@ -23,7 +23,8 @@ user_language = {}
 main_keyboard = types.ReplyKeyboardMarkup(
     keyboard=[
         [types.KeyboardButton(text="start")],
-        [types.KeyboardButton(text="languages")]
+        [types.KeyboardButton(text="languages")],
+        [types.KeyboardButton(text="Identify Values")]
     ],
     resize_keyboard=True
 )
@@ -33,7 +34,8 @@ main_keyboard = types.ReplyKeyboardMarkup(
 @dp.message(F.text.lower() == 'start')
 async def cmd_start(message: Message):
     await message.reply("Hello! Send me a voice message and I will convert it into text. "
-                        "Use /language to choose your language.", reply_markup=main_keyboard)
+                        "Use /language to choose your language or click 'Identify Values' to start a dialogue about your key values.",
+                            reply_markup=main_keyboard)
 
 
 @dp.message(Command('language'))
@@ -70,10 +72,23 @@ async def handle_voice(message: Message):
     await process_voice(bot, message, language)
 
 
+@dp.message(F.text == "Identify Values")
+async def start_value_dialogue_command(message: Message):
+    await start_value_dialogue(message.from_user.id, message)
+
+
+@dp.message(F.text)
+async def handle_text(message: Message):
+    user_id = message.from_user.id
+    user_input = message.text
+    await handle_user_value(user_id, user_input, message)
+
+
 async def on_startup():
     await bot.set_my_commands([
         types.BotCommand(command="start", description="Start the bot"),
-        types.BotCommand(command="language", description="Choose language")
+        types.BotCommand(command="language", description="Choose language"),
+        types.BotCommand(command="values", description="Identify key values")
     ])
 
 if __name__ == '__main__':
